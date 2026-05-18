@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Surviv RL — Spectate</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; }
+    #overlay {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      font-family: 'Courier New', monospace;
+    }
+    #topbar {
+      position: absolute;
+      top: 14px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.60);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      padding: 6px 20px;
+      font-size: 13px;
+      color: #ccc;
+      white-space: nowrap;
+    }
+    #legend {
+      position: absolute;
+      bottom: 20px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Config lobby ── */
+    #lobby {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.92);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 32px;
+      font-family: 'Courier New', monospace;
+      z-index: 20;
+    }
+    #lobby h1 {
+      font-size: 42px;
+      color: #42a5f5;
+      letter-spacing: 0.15em;
+      text-shadow: 0 0 28px rgba(66,165,245,0.5);
+    }
+    .agent-row {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      font-size: 15px;
+    }
+    .agent-label {
+      width: 90px;
+      text-align: right;
+      letter-spacing: 0.06em;
+    }
+    .agent-row.a0 .agent-label { color: #42a5f5; }
+    .agent-row.a1 .agent-label { color: #ef5350; }
+    .policy-btn {
+      padding: 8px 22px;
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 6px;
+      background: transparent;
+      color: rgba(255,255,255,0.55);
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .policy-btn.active-nn  { background: #1565c0; color: #fff; border-color: #42a5f5; }
+    .policy-btn.active-code { background: #4a148c; color: #fff; border-color: #ce93d8; }
+    #start-btn {
+      margin-top: 8px;
+      padding: 12px 48px;
+      border: none;
+      border-radius: 8px;
+      background: #1b5e20;
+      color: #a5d6a7;
+      font-family: 'Courier New', monospace;
+      font-size: 15px;
+      letter-spacing: 0.12em;
+      cursor: pointer;
+      text-transform: uppercase;
+      transition: background 0.15s;
+    }
+    #start-btn:hover { background: #2e7d32; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="overlay">
+  <div id="topbar">Connecting…</div>
+  <div id="legend">
+    <span style="color:#42a5f5">■ Agent 0</span>
+    &nbsp;·&nbsp;
+    <span style="color:#ef5350">■ Agent 1</span>
+    &nbsp;·&nbsp; cone = vision field &nbsp;·&nbsp; rays = observation
+  </div>
+</div>
+
+<!-- Config lobby (visible until Start is clicked) -->
+<div id="lobby">
+  <h1>SPECTATE</h1>
+
+  <div class="agent-row a0">
+    <span class="agent-label">Agent 0</span>
+    <button class="policy-btn active-nn" id="p0-nn"   onclick="pick(0,'nn')">Neural Net</button>
+    <button class="policy-btn"           id="p0-code" onclick="pick(0,'code')">Coded</button>
+  </div>
+
+  <div class="agent-row a1">
+    <span class="agent-label">Agent 1</span>
+    <button class="policy-btn active-nn" id="p1-nn"   onclick="pick(1,'nn')">Neural Net</button>
+    <button class="policy-btn"           id="p1-code" onclick="pick(1,'code')">Coded</button>
+  </div>
+
+  <button id="start-btn" onclick="startWatch()">Start Watching</button>
+</div>
+
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+'use strict';
+
+const MAP_W = 1000, MAP_H = 1000;
+const P_R   = 18;
+const FOV_RANGE = 16 * P_R;   // 288 — must match game.py
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const topbar = document.getElementById('topbar');
+const lobby  = document.getElementById('lobby');
+
+let gstate = null;
+const choices = ['nn', 'nn'];   // per-agent selection
+
+const socket = io({ transports: ['websocket'] });
+socket.on('connect',    () => { topbar.textContent = 'Connected — choose policies above'; });
+socket.on('state',      s  => { gstate = s; });
+socket.on('disconnect', () => { topbar.textContent = 'Disconnected'; });
+
+// ── Lobby controls ───────────────────────────────────────────────────────────
+function pick(agent, type) {
+  choices[agent] = type;
+  const ids = agent === 0 ? ['p0-nn', 'p0-code'] : ['p1-nn', 'p1-code'];
+  document.getElementById(ids[0]).className =
+    'policy-btn' + (type === 'nn' ? ' active-nn' : '');
+  document.getElementById(ids[1]).className =
+    'policy-btn' + (type === 'code' ? ' active-code' : '');
+}
+
+function startWatch() {
+  socket.emit('set_policies', { p0: choices[0], p1: choices[1] });
+  lobby.style.display = 'none';
+}
+
+// ── Canvas ───────────────────────────────────────────────────────────────────
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+// ── Ground ───────────────────────────────────────────────────────────────────
+function drawGround(camX, camY) {
+  ctx.fillStyle = '#3a6140';
+  ctx.fillRect(-camX, -camY, MAP_W, MAP_H);
+  ctx.save();
+  ctx.translate(-camX, -camY);
+  ctx.strokeStyle = 'rgba(0,0,0,0.17)'; ctx.lineWidth = 1;
+  for (let x = 0; x <= MAP_W; x += 100) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, MAP_H); ctx.stroke();
+  }
+  for (let y = 0; y <= MAP_H; y += 100) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(MAP_W, y); ctx.stroke();
+  }
+  ctx.strokeStyle = '#1c2e1e'; ctx.lineWidth = 6;
+  ctx.strokeRect(0, 0, MAP_W, MAP_H);
+  ctx.restore();
+}
+
+// ── Poison ───────────────────────────────────────────────────────────────────
+function drawPoison(po, camX, camY) {
+  const W = canvas.width, H = canvas.height;
+  const r  = Math.max(0, po.radius);
+  const sx = po.cx - camX, sy = po.cy - camY;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-2000, -2000, 6000, 6000);
+  if (r > 0) ctx.arc(sx, sy, r, 0, Math.PI * 2, true);
+  ctx.fillStyle = 'rgba(190,10,10,0.30)';
+  ctx.fill('evenodd');
+  ctx.restore();
+  if (r > 0) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,55,55,0.88)'; ctx.lineWidth = 3;
+    ctx.shadowColor = 'rgba(255,0,0,0.65)'; ctx.shadowBlur = 16;
+    ctx.stroke(); ctx.restore();
+  }
+}
+
+// ── Obstacles ────────────────────────────────────────────────────────────────
+function drawObstacles(obstacles, camX, camY) {
+  for (const o of obstacles) {
+    const sx = o.cx - camX, sy = o.cy - camY;
+    ctx.save();
+    ctx.translate(sx, sy); ctx.rotate(o.angle);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-o.w/2+4, -o.h/2+5, o.w, o.h);
+    ctx.fillStyle = '#6b4226';
+    ctx.fillRect(-o.w/2, -o.h/2, o.w, o.h);
+    ctx.fillStyle = '#8b5a35';
+    ctx.fillRect(-o.w/2, -o.h/2, o.w, Math.min(4, o.h));
+    ctx.fillStyle = '#7a4c2e';
+    ctx.fillRect(-o.w/2, -o.h/2, Math.min(4, o.w), o.h);
+    ctx.restore();
+  }
+}
+
+// ── Bullets ──────────────────────────────────────────────────────────────────
+function drawBullets(bullets, camX, camY) {
+  ctx.save();
+  ctx.shadowColor = '#ffc400'; ctx.shadowBlur = 9; ctx.fillStyle = '#ffe57f';
+  for (const b of bullets) {
+    ctx.beginPath(); ctx.arc(b.x - camX, b.y - camY, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ── Player ───────────────────────────────────────────────────────────────────
+function drawPlayer(p, isA0, camX, camY) {
+  const sx = p.x - camX, sy = p.y - camY;
+  const ca = Math.cos(p.angle), sa = Math.sin(p.angle);
+
+  ctx.beginPath(); ctx.arc(sx+3, sy+4, P_R, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.fill();
+
+  ctx.beginPath(); ctx.arc(sx, sy, P_R, 0, Math.PI*2);
+  ctx.fillStyle   = isA0 ? '#42a5f5' : '#ef5350';
+  ctx.fill();
+  ctx.strokeStyle = isA0 ? '#1565c0' : '#b71c1c';
+  ctx.lineWidth   = 2.5; ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(sx + ca*5, sy + sa*5);
+  ctx.lineTo(sx + ca*(P_R+14), sy + sa*(P_R+14));
+  ctx.strokeStyle = isA0 ? 'rgba(255,255,255,0.92)' : 'rgba(255,190,190,0.85)';
+  ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.stroke(); ctx.lineCap = 'butt';
+
+  const hp = Math.ceil(p.health);
+  ctx.fillStyle = hp > 50 ? '#fff' : hp > 25 ? '#ff9800' : '#f44336';
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(hp), sx, sy);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+
+// ── Vision dim + cone cutouts ────────────────────────────────────────────────
+function applyDim(p0, obs0, p1, obs1, camX, camY) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-2000, -2000, 6000, 6000);
+
+  function addCone(p, obs) {
+    if (!p || !p.alive || !obs || !obs.cone_pts || obs.cone_pts.length === 0) return;
+    const sx = p.x - camX, sy = p.y - camY;
+    ctx.moveTo(sx, sy);
+    for (const [wx, wy] of obs.cone_pts) ctx.lineTo(wx - camX, wy - camY);
+    ctx.closePath();
+  }
+  addCone(p0, obs0);
+  addCone(p1, obs1);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.68)';
+  ctx.fill('evenodd');
+
+  function strokeCone(p, obs, color) {
+    if (!p || !p.alive || !obs || !obs.cone_pts || obs.cone_pts.length === 0) return;
+    const sx = p.x - camX, sy = p.y - camY;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    for (const [wx, wy] of obs.cone_pts) ctx.lineTo(wx - camX, wy - camY);
+    ctx.closePath();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  strokeCone(p0, obs0, 'rgba(66,165,245,0.55)');
+  strokeCone(p1, obs1, 'rgba(239,83,80,0.55)');
+  ctx.restore();
+}
+
+// ── Perception rays ──────────────────────────────────────────────────────────
+const RAY_COLORS = {
+  empty:  { line: 'rgba(255,255,255,0.10)', dot: null },
+  wall:   { line: 'rgba(255,165, 60,0.55)', dot: 'rgba(255,165, 60,0.80)' },
+  poison: { line: 'rgba(180, 60,220,0.65)', dot: 'rgba(180, 60,220,0.90)' },
+  enemy:  { line: 'rgba(255, 70, 70,0.85)', dot: 'rgba(255, 70, 70,1.00)' },
+  bullet: { line: 'rgba( 80,160,255,0.90)', dot: 'rgba( 80,160,255,1.00)' },
+};
+
+function drawPerceptionRays(p, obs, camX, camY) {
+  if (!p || !p.alive || !obs || !obs.rays) return;
+  const sx = p.x - camX, sy = p.y - camY;
+  ctx.save();
+  obs.rays.forEach((ray, i) => {
+    const deg = -30 + i * 2;
+    const a   = p.angle + deg * Math.PI / 180;
+    const t   = ray.dist * FOV_RANGE;
+    const ex  = sx + Math.cos(a) * t;
+    const ey  = sy + Math.sin(a) * t;
+    const col = RAY_COLORS[ray.type] || RAY_COLORS.empty;
+
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey);
+    ctx.strokeStyle = col.line;
+    ctx.lineWidth   = (ray.type === 'enemy' || ray.type === 'bullet') ? 1.5 : 1;
+    ctx.stroke();
+
+    if (col.dot) {
+      ctx.beginPath();
+      ctx.arc(ex, ey, ray.type === 'enemy' ? 3 : 2, 0, Math.PI * 2);
+      ctx.fillStyle = col.dot; ctx.fill();
+
+      const lx = sx + Math.cos(a) * (t + 8);
+      const ly = sy + Math.sin(a) * (t + 8);
+      ctx.font = '8px monospace';
+      ctx.fillStyle = col.dot;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(ray.dist.toFixed(2), lx, ly);
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    }
+  });
+  ctx.restore();
+}
+
+// ── Label helpers ─────────────────────────────────────────────────────────────
+function policyLabel(type) {
+  return type === 'nn' ? 'NN' : 'Coded';
+}
+
+// ── Main render loop ─────────────────────────────────────────────────────────
+function render() {
+  requestAnimationFrame(render);
+  if (!gstate) return;
+
+  const ps  = gstate.players || {};
+  const p0  = ps['agent0'];
+  const p1  = ps['agent1'];
+  const W   = canvas.width;
+  const H   = canvas.height;
+  const pt  = gstate.policy_types || ['nn', 'nn'];
+
+  // Scale to fit the whole map with a small margin
+  const scale = Math.min(W / MAP_W, H / MAP_H) * 0.92;
+  const offX  = (W - MAP_W * scale) / 2;
+  const offY  = (H - MAP_H * scale) / 2;
+
+  // Background outside the map
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#0d130e';
+  ctx.fillRect(0, 0, W, H);
+
+  // All game drawing in world coordinates
+  ctx.setTransform(scale, 0, 0, scale, offX, offY);
+
+  drawGround(0, 0);
+  drawObstacles(gstate.obstacles || [], 0, 0);
+  drawPoison(gstate.poison, 0, 0);
+  drawBullets(gstate.bullets, 0, 0);
+
+  for (const [pid, p] of Object.entries(ps)) {
+    if (p.alive) drawPlayer(p, pid === 'agent0', 0, 0);
+  }
+
+  const obs0 = gstate.observations && gstate.observations['agent0'];
+  const obs1 = gstate.observations && gstate.observations['agent1'];
+  applyDim(p0, obs0, p1, obs1, 0, 0);
+  drawPerceptionRays(p0, obs0, 0, 0);
+  drawPerceptionRays(p1, obs1, 0, 0);
+
+  // Reset transform for HUD / topbar
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  const ep    = (gstate.episode ?? 0) + 1;
+  const step  = gstate.step ?? 0;
+  const hp0   = p0 ? Math.max(0, Math.ceil(p0.health)) : 0;
+  const hp1   = p1 ? Math.max(0, Math.ceil(p1.health)) : 0;
+  const r     = gstate.poison ? Math.round(gstate.poison.radius) : 0;
+  const wins  = gstate.wins  || [0, 0];
+  const draws = gstate.draws || 0;
+  const record = draws > 0 ? ` (${draws}D)` : '';
+  topbar.innerHTML =
+    `Ep ${ep} &nbsp;·&nbsp; Step ${step}` +
+    `&nbsp;&nbsp;&nbsp;` +
+    `<span style="color:#42a5f5">A0 [${policyLabel(pt[0])}] ${hp0} HP &nbsp;${wins[0]}W</span>` +
+    ` &nbsp;vs&nbsp; ` +
+    `<span style="color:#ef5350">${wins[1]}W&nbsp; ${hp1} HP [${policyLabel(pt[1])}] A1</span>` +
+    `${record}&nbsp;&nbsp;&nbsp;Zone r=${r}`;
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>

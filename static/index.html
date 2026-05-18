@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Surviv RL</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    canvas { display: block; }
+
+    #overlay {
+      position: fixed; inset: 0;
+      pointer-events: none;
+      font-family: 'Courier New', monospace;
+    }
+
+    /* Top status bar */
+    #topbar {
+      position: absolute;
+      top: 14px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      padding: 5px 18px;
+      font-size: 13px;
+      color: #ccc;
+      white-space: nowrap;
+      transition: color 0.2s;
+    }
+
+    /* Bottom HUD */
+    #hud {
+      position: absolute;
+      bottom: 22px; left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    #hp-display {
+      font-size: 13px;
+      font-weight: bold;
+      color: #ccc;
+      letter-spacing: 0.05em;
+    }
+    #controls {
+      font-size: 11px;
+      color: rgba(255,255,255,0.4);
+      letter-spacing: 0.04em;
+    }
+
+    /* Lobby screen */
+    #lobby {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.92);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      font-family: 'Courier New', monospace;
+      z-index: 20;
+    }
+    #lobby h1 {
+      font-size: 52px;
+      color: #42a5f5;
+      letter-spacing: 0.15em;
+      text-shadow: 0 0 32px rgba(66,165,245,0.55);
+      margin: 0;
+    }
+    #lobby .lbl {
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    #bot-btns {
+      display: flex;
+      gap: 10px;
+    }
+    .bot-btn {
+      width: 50px; height: 50px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 8px;
+      color: #aaa;
+      font-size: 20px;
+      font-family: 'Courier New', monospace;
+      cursor: pointer;
+      transition: all 0.12s;
+    }
+    .bot-btn:hover { background: rgba(66,165,245,0.18); border-color: rgba(66,165,245,0.45); }
+    .bot-btn.active {
+      background: rgba(66,165,245,0.32);
+      border-color: #42a5f5;
+      color: #fff;
+    }
+    #play-btn {
+      padding: 13px 52px;
+      background: #42a5f5;
+      border: none;
+      border-radius: 8px;
+      color: #000;
+      font-size: 15px;
+      font-weight: bold;
+      font-family: 'Courier New', monospace;
+      letter-spacing: 0.12em;
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    #play-btn:hover { background: #64b5f6; }
+
+    /* Death / Win screens */
+    #death, #win {
+      position: absolute; inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      pointer-events: auto;
+    }
+    #death h1 {
+      font-size: 60px;
+      color: #ef5350;
+      text-shadow: 0 0 32px rgba(239,83,80,0.7);
+      letter-spacing: 0.1em;
+    }
+    #win h1 {
+      font-size: 60px;
+      color: #66bb6a;
+      text-shadow: 0 0 32px rgba(102,187,106,0.7);
+      letter-spacing: 0.1em;
+    }
+    #death p, #win p { color: #888; font-size: 15px; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="lobby">
+  <h1>SURVIV RL</h1>
+  <div class="lbl">Opponents</div>
+  <div id="bot-btns">
+    <button class="bot-btn active" data-n="1">1</button>
+    <button class="bot-btn" data-n="2">2</button>
+    <button class="bot-btn" data-n="3">3</button>
+    <button class="bot-btn" data-n="4">4</button>
+  </div>
+  <button id="play-btn">PLAY</button>
+</div>
+
+<div id="overlay">
+  <div id="topbar">Connecting…</div>
+  <div id="hud">
+    <div id="hp-display">100 HP</div>
+    <div id="controls">
+      WASD move &nbsp;·&nbsp; Q / ← turn left &nbsp;·&nbsp; E / → turn right &nbsp;·&nbsp; SPACE shoot
+    </div>
+  </div>
+  <div id="death">
+    <h1>YOU DIED</h1>
+    <p>Refresh to play again</p>
+  </div>
+  <div id="win">
+    <h1>YOU WIN</h1>
+    <p>Refresh to play again</p>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+'use strict';
+
+// ---------- constants (must match game.py) ----------
+const MAP_W = 1000, MAP_H = 1000;
+const P_R   = 18;
+const POISON_R0 = 720;
+
+// ---------- DOM refs ----------
+const canvas   = document.getElementById('c');
+const ctx      = canvas.getContext('2d');
+const topbar    = document.getElementById('topbar');
+const hpDisplay = document.getElementById('hp-display');
+const deathEl   = document.getElementById('death');
+const winEl     = document.getElementById('win');
+
+// ---------- state ----------
+let myId  = null;
+let gstate = null;
+let dead  = false;
+let won   = false;
+let socket = null;
+
+// ---------- lobby ----------
+let selectedBots = 1;
+document.querySelectorAll('.bot-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.bot-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    selectedBots = parseInt(btn.dataset.n, 10);
+  });
+});
+document.getElementById('play-btn').addEventListener('click', () => {
+  document.getElementById('lobby').style.display = 'none';
+  startGame(selectedBots);
+});
+
+// ---------- socket (deferred until Play is clicked) ----------
+function startGame(numBots) {
+  socket = io({ transports: ['websocket'], query: { bots: numBots } });
+  socket.on('connect',    () => { topbar.textContent = 'Connected — waiting…'; });
+  socket.on('welcome',    ({ id }) => { myId = id; topbar.textContent = `Player ${id}`; });
+  socket.on('state',      s  => { gstate = s; });
+  socket.on('disconnect', () => { topbar.textContent = 'Disconnected — refresh to reconnect'; });
+}
+
+// ---------- input ----------
+const keys = {};
+const KEY_MAP = {
+  KeyW: 'w', KeyS: 's', KeyA: 'a', KeyD: 'd',
+  KeyQ: 'q', KeyE: 'e', Space: 'space',
+  ArrowLeft: 'q', ArrowRight: 'e',
+  ArrowUp: 'w', ArrowDown: 's',
+};
+
+function pushKeys() {
+  if (socket && myId && socket.connected) socket.emit('keys', keys);
+}
+
+window.addEventListener('keydown', e => {
+  const k = KEY_MAP[e.code];
+  if (!k) return;
+  e.preventDefault();
+  if (!keys[k]) { keys[k] = true; pushKeys(); }
+});
+window.addEventListener('keyup', e => {
+  const k = KEY_MAP[e.code];
+  if (!k) return;
+  e.preventDefault();
+  if (keys[k]) { delete keys[k]; pushKeys(); }
+});
+
+// ---------- resize ----------
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- draw helpers ----------
+
+function drawGround(camX, camY) {
+  const W = canvas.width, H = canvas.height;
+
+  // outside-map void
+  ctx.fillStyle = '#0d130e';
+  ctx.fillRect(0, 0, W, H);
+
+  // map ground
+  ctx.fillStyle = '#3a6140';
+  ctx.fillRect(-camX, -camY, MAP_W, MAP_H);
+
+  // subtle grid
+  ctx.save();
+  ctx.translate(-camX, -camY);
+  ctx.strokeStyle = 'rgba(0,0,0,0.17)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= MAP_W; x += 100) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, MAP_H); ctx.stroke();
+  }
+  for (let y = 0; y <= MAP_H; y += 100) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(MAP_W, y); ctx.stroke();
+  }
+  // map border
+  ctx.strokeStyle = '#1c2e1e';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(0, 0, MAP_W, MAP_H);
+  ctx.restore();
+}
+
+function drawPoison(po, camX, camY) {
+  const W = canvas.width, H = canvas.height;
+  const r  = Math.max(0, po.radius);
+  const sx = po.cx - camX;   // poison center in screen coords
+  const sy = po.cy - camY;
+
+  // Red overlay outside the safe zone (evenodd fill: rect - circle = ring)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);                          // full screen (clockwise)
+  if (r > 0) ctx.arc(sx, sy, r, 0, Math.PI * 2, true); // safe zone hole (CCW)
+  ctx.fillStyle = 'rgba(190, 10, 10, 0.30)';
+  ctx.fill('evenodd');
+  ctx.restore();
+
+  // Glowing ring at the boundary
+  if (r > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255, 55, 55, 0.88)';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = 'rgba(255, 0, 0, 0.65)';
+    ctx.shadowBlur = 16;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawObstacles(obstacles, camX, camY) {
+  for (const o of obstacles) {
+    const sx = o.cx - camX, sy = o.cy - camY;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(o.angle);
+
+    // drop shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-o.w / 2 + 4, -o.h / 2 + 5, o.w, o.h);
+
+    // body
+    ctx.fillStyle = '#6b4226';
+    ctx.fillRect(-o.w / 2, -o.h / 2, o.w, o.h);
+
+    // top-face highlight
+    ctx.fillStyle = '#8b5a35';
+    ctx.fillRect(-o.w / 2, -o.h / 2, o.w, Math.min(4, o.h));
+
+    // left-edge highlight
+    ctx.fillStyle = '#7a4c2e';
+    ctx.fillRect(-o.w / 2, -o.h / 2, Math.min(4, o.w), o.h);
+
+    ctx.restore();
+  }
+}
+
+// ---------- Perception rays (observation slices at integer degrees) ----------
+
+// Colour per hit type — keep in sync with server
+const RAY_COLORS = {
+  empty:  { line: 'rgba(255,255,255,0.12)', dot: null },
+  wall:   { line: 'rgba(255,165, 60,0.65)', dot: 'rgba(255,165, 60,0.85)' },
+  poison: { line: 'rgba(180, 60,220,0.75)', dot: 'rgba(180, 60,220,0.95)' },
+  enemy:  { line: 'rgba(255, 70, 70,0.90)', dot: 'rgba(255, 70, 70,1.00)' },
+  bullet: { line: 'rgba( 80,160,255,0.95)', dot: 'rgba( 80,160,255,1.00)' },
+};
+
+function drawPerceptionRays(p, obs, camX, camY) {
+  if (!p || !p.alive || !obs || !obs.rays) return;
+  const sx = p.x - camX, sy = p.y - camY;
+  const rays = obs.rays;   // 31 entries from server
+
+  ctx.save();
+  rays.forEach((ray, i) => {
+    const deg = -30 + i * 2;          // -30, -28, … +30
+    const a   = p.angle + deg * Math.PI / 180;
+    const t   = ray.dist * FOV_RANGE;
+    const ex  = sx + Math.cos(a) * t;
+    const ey  = sy + Math.sin(a) * t;
+    const col = RAY_COLORS[ray.type] || RAY_COLORS.empty;
+
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.strokeStyle = col.line;
+    ctx.lineWidth   = (ray.type === 'enemy' || ray.type === 'bullet') ? 1.5 : 1;
+    ctx.stroke();
+
+    if (col.dot) {
+      ctx.beginPath();
+      ctx.arc(ex, ey, ray.type === 'enemy' ? 3 : 2, 0, Math.PI * 2);
+      ctx.fillStyle = col.dot;
+      ctx.fill();
+
+      // Distance label offset slightly away from player
+      const lx = sx + Math.cos(a) * (t + 8);
+      const ly = sy + Math.sin(a) * (t + 8);
+      ctx.font = '8px monospace';
+      ctx.fillStyle = col.dot;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ray.dist.toFixed(2), lx, ly);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    }
+  });
+  ctx.restore();
+}
+
+// ---------- Vision mask — polygon computed server-side, client just renders ----------
+const FOV_RANGE = 16 * P_R;   // 288 units — must match game.py
+
+function applyVisionMask(p, obs, camX, camY) {
+  if (!p || !p.alive || !obs || !obs.cone_pts) return;
+  const W = canvas.width, H = canvas.height;
+  const sx = p.x - camX, sy = p.y - camY;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, W, H);
+  ctx.moveTo(sx, sy);
+  for (const [wx, wy] of obs.cone_pts) ctx.lineTo(wx - camX, wy - camY);
+  ctx.closePath();
+  ctx.fillStyle = '#000';
+  ctx.fill('evenodd');
+  ctx.restore();
+}
+
+function drawBullets(bullets, camX, camY) {
+  ctx.save();
+  ctx.shadowColor = '#ffc400';
+  ctx.shadowBlur  = 9;
+  ctx.fillStyle   = '#ffe57f';
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x - camX, b.y - camY, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawPlayer(p, isMe, camX, camY) {
+  const sx = p.x - camX, sy = p.y - camY;
+  const ca = Math.cos(p.angle), sa = Math.sin(p.angle);
+
+  // drop shadow
+  ctx.beginPath();
+  ctx.arc(sx + 3, sy + 4, P_R, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.fill();
+
+  // body
+  ctx.beginPath();
+  ctx.arc(sx, sy, P_R, 0, Math.PI * 2);
+  ctx.fillStyle   = isMe ? '#42a5f5' : '#ef5350';
+  ctx.fill();
+  ctx.strokeStyle = isMe ? '#1565c0' : '#b71c1c';
+  ctx.lineWidth   = 2.5;
+  ctx.stroke();
+
+  // gun barrel (facing direction)
+  const tipX = sx + ca * (P_R + 14);
+  const tipY = sy + sa * (P_R + 14);
+  ctx.beginPath();
+  ctx.moveTo(sx + ca * 5, sy + sa * 5);
+  ctx.lineTo(tipX, tipY);
+  ctx.strokeStyle = isMe ? 'rgba(255,255,255,0.92)' : 'rgba(255,190,190,0.85)';
+  ctx.lineWidth   = 4;
+  ctx.lineCap     = 'round';
+  ctx.stroke();
+  ctx.lineCap = 'butt';
+
+  // HP number inside circle
+  const hp = Math.ceil(p.health);
+  const hColor = hp > 50 ? '#fff' : hp > 25 ? '#ff9800' : '#f44336';
+  ctx.fillStyle = hColor;
+  ctx.font = `bold 10px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(hp), sx, sy);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ---------- HUD update ----------
+function updateHUD(me) {
+  const hp = Math.max(0, Math.ceil(me.health));
+  hpDisplay.textContent = hp + ' HP';
+  hpDisplay.style.color = hp > 50 ? '#ccc' : hp > 25 ? '#ff9800' : '#f44336';
+
+  if (!me.alive && !dead) {
+    dead = true;
+    deathEl.style.display = 'flex';
+  }
+  if (!won && gstate.result === 'win') {
+    won = true;
+    winEl.style.display = 'flex';
+  }
+}
+
+// ---------- main render loop ----------
+function render() {
+  requestAnimationFrame(render);
+
+  if (!gstate || !myId) return;
+  const me = gstate.players[myId];
+  if (!me) return;
+
+  const W = canvas.width, H = canvas.height;
+  const camX = me.x - W / 2;
+  const camY = me.y - H / 2;
+
+  ctx.clearRect(0, 0, W, H);
+
+  drawGround(camX, camY);
+  drawObstacles(gstate.obstacles || [], camX, camY);
+  drawPoison(gstate.poison, camX, camY);
+  drawBullets(gstate.bullets, camX, camY);
+
+  for (const [pid, p] of Object.entries(gstate.players)) {
+    if (p.alive) drawPlayer(p, pid === myId, camX, camY);
+  }
+
+  const myObs = gstate.observations && gstate.observations[myId];
+  drawPerceptionRays(me, myObs, camX, camY);
+  applyVisionMask(me, myObs, camX, camY);  // black out last
+
+  updateHUD(me);
+
+  // topbar: zone status
+  if (me.alive) {
+    const r = gstate.poison.radius;
+    const pct = Math.round(r / POISON_R0 * 100);
+    const dist = Math.hypot(me.x - gstate.poison.cx, me.y - gstate.poison.cy);
+    const inside = dist <= r;
+    const botsAlive = Object.entries(gstate.players)
+      .filter(([pid, p]) => pid.startsWith('bot_') && p.alive).length;
+    topbar.textContent = `Enemies: ${botsAlive}  ·  Safe zone ${pct}%  (r=${Math.round(r)})` +
+                         (inside ? '' : '   ⚠ OUTSIDE — taking damage!');
+    topbar.style.color = inside ? '#ccc' : '#ff5252';
+  }
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
